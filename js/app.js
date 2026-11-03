@@ -21,7 +21,8 @@ const BOOT_LOG_KEY = 'ruby-reader-boot-log'; // 起動にかかった時間（�
 const BOOT_LOG_SIZE = 5;
 const UPDATING_KEY = 'ruby-reader-updating'; // 新しい版へ入れ替わるための読み込み直し
 const SLOW_DATA_MS = 5000; // 保存データの応答がこれより遅ければ、待っていることを知らせる
-const RELOAD_WAIT_MS = 1000; // 新しい版へ入れ替わるときに、位置の保存を待つ上限
+const HIDDEN_AT_KEY = 'ruby-reader-hidden-at'; // 最後に裏へ回った時刻（起動が遅いときの手がかり）
+const PROGRESS_KEY = 'ruby-reader-progress:'; // 文書ごとの読んでいた位置
 
 const settings = loadSettings();
 let current = null; // 開いている文書
@@ -75,13 +76,33 @@ function formatDate(ms) {
 
 const displayName = (name) => name.replace(/\.txt$/i, '');
 
+// ---- 読んでいた位置
+// IndexedDB には書かない。ページを閉じる途中でも確実に残せて、本文ごと書き直さずに済む（docs/design.md）
+
+function readProgress(id) {
+  try {
+    return JSON.parse(storageGet(PROGRESS_KEY + id) ?? 'null');
+  } catch {
+    return null;
+  }
+}
+
+function saveProgress({ id, position, progress, openedAt }) {
+  storageSet(PROGRESS_KEY + id, JSON.stringify({ position, progress, openedAt }));
+}
+
+// 以前の版が文書に保存した位置は、新しく保存するまでそのまま使う
+const withProgress = (doc) => doc && { ...doc, ...readProgress(doc.id) };
+const loadDocs = async () => (await store.getDocs()).map(withProgress);
+const loadDoc = async (id) => withProgress(await store.getDoc(id));
+
 // ---- 取り込み
 
 const newDoc = (fields, now) => ({ ...fields, receivedAt: now, openedAt: 0, position: null, progress: 0 });
 
 // folder: 束を Dropbox のフォルダと結び付けるときの情報
 async function ingest(files, { title, folder } = {}) {
-  const docs = await store.getDocs();
+  const docs = await loadDocs();
   const books = await store.getBooks();
   const plan = planIncoming(files, docs, books, () => crypto.randomUUID(), { title });
   const now = Date.now();
@@ -339,7 +360,6 @@ async function applyDropboxChanges(changes) {
   }
   if (!writes.length) return 0;
 
-  // savePositionNow は current を丸ごと保存するので、保存より前に current も新しくする
   const shown = current && writes.find((w) => w.id === current.id);
   const position = shown ? reader.capture() : null;
   if (shown) current = { ...current, name: shown.name, text: shown.text, dropbox: shown.dropbox, receivedAt: now };
@@ -373,7 +393,7 @@ async function showLibrary() {
   document.title = 'ルビリーダー';
   updateDropboxRow();
 
-  const docs = await store.getDocs();
+  const docs = await loadDocs();
   const books = await store.getBooks();
   const list = $('doc-list');
   list.textContent = '';
@@ -422,6 +442,7 @@ async function showLibrary() {
     del.addEventListener('click', async () => {
       if (!confirm(`「${row.name}」をこの端末から削除しますか？（Dropboxのファイルは消えません）`)) return;
       await store.removeDocs(row.removeIds, row.bookId);
+      for (const id of row.removeIds) storageSet(PROGRESS_KEY + id, null);
       if (row.removeIds.includes(storageGet(LAST_DOC_KEY))) storageSet(LAST_DOC_KEY, null);
       showLibrary();
     });
@@ -440,7 +461,7 @@ function effectiveBracket(override, text) {
 
 async function bookDocs() {
   if (!current?.bookId) return [];
-  const docs = await store.getDocs();
+  const docs = await loadDocs();
   return docs.filter((d) => d.bookId === current.bookId).sort((a, b) => compareNames(a.name, b.name));
 }
 
@@ -462,7 +483,7 @@ function showDocHeader(doc) {
 
 async function openDoc(id, { atEnd = false, pushHistory = true } = {}) {
   await savePositionNow();
-  const doc = await store.getDoc(id);
+  const doc = await loadDoc(id);
   if (!doc) return showLibrary();
   current = doc;
   current.openedAt = Date.now();
@@ -498,13 +519,12 @@ function schedulePositionSave() {
   saveTimer = setTimeout(savePositionNow, 400);
 }
 
-async function savePositionNow() {
+function savePositionNow() {
   clearTimeout(saveTimer);
   if (!current) return;
   current.position = reader.capture();
   current.progress = reader.fraction;
-  const { detected, ...doc } = current;
-  await store.putDoc(doc);
+  saveProgress(current);
 }
 
 // レイアウトが変わるときは、先頭の文字が変わらないようにする
@@ -538,7 +558,7 @@ async function moveChapter(step) {
     return;
   }
   // 順に読み進めるときは章の端から始める（前の章へ戻るときは章の終わりへ）
-  if (step > 0) await store.putDoc({ ...target, position: null });
+  if (step > 0) saveProgress({ ...target, position: null });
   await openDoc(target.id, { atEnd: step < 0 });
 }
 
@@ -763,6 +783,8 @@ async function onBracketChange(value) {
     await store.putBook(currentBook);
   } else {
     current.bracket = value;
+    const { detected, ...doc } = current;
+    await store.putDoc(doc);
   }
   const pos = reader.capture();
   await renderCurrent();
@@ -811,12 +833,22 @@ function readBootLog() {
   }
 }
 
-// marks: スクリプトが動き始めた時刻、保存データを読み終えた時刻。ページを開いてからの ms
-function recordBoot({ scriptAt, dataAt }, updated) {
+// 時刻はページを開いてからの ms。notes は遅いときの手がかり
+function recordBoot({ scriptAt, openAt, inboxAt, dataAt }, notes) {
   const seconds = (ms) => (ms / 1000).toFixed(1);
   const now = performance.now();
-  const line = `${formatDate(Date.now())} 計${seconds(now)}秒（読み込み ${seconds(scriptAt)} / 保存データ ${seconds(dataAt - scriptAt)} / 表示 ${seconds(now - dataAt)}）${updated ? ' 更新の直後' : ''}`;
+  const data = `${seconds(dataAt - scriptAt)}（開く ${seconds(openAt - scriptAt)} / 受信 ${seconds(inboxAt - openAt)} / 文書 ${seconds(dataAt - inboxAt)}）`;
+  const line = `${formatDate(Date.now())} 計${seconds(now)}秒（読み込み ${seconds(scriptAt)} / 保存データ ${data} / 表示 ${seconds(now - dataAt)}）${notes.map((n) => ` ${n}`).join('')}`;
   storageSet(BOOT_LOG_KEY, JSON.stringify([line, ...readBootLog()].slice(0, BOOT_LOG_SIZE)));
+}
+
+function bootNotes(updated) {
+  const notes = updated ? ['更新の直後'] : [];
+  const pending = store.takePendingWrite();
+  if (pending) notes.push(`前回の書き込みが未完了（${pending}）`);
+  const hiddenAt = Number(storageGet(HIDDEN_AT_KEY));
+  if (hiddenAt) notes.push(`前回の終了から${Math.round((Date.now() - hiddenAt) / 1000)}秒`);
+  return notes;
 }
 
 function showBoot(message) {
@@ -832,8 +864,8 @@ function setupServiceWorker() {
     if (!hadController) return;
     showBoot('新しい版に更新しています…');
     storageSet(UPDATING_KEY, '1');
-    // 保存データがふさがれていても入れ替えを止めない。間に合わなければ、少し前に保存した位置に戻る
-    Promise.race([savePositionNow(), new Promise((resolve) => setTimeout(resolve, RELOAD_WAIT_MS))]).finally(() => location.reload());
+    savePositionNow();
+    location.reload();
   });
   navigator.serviceWorker.addEventListener('message', (e) => {
     if (e.data?.version) $('version').textContent = `版: ${e.data.version}`;
@@ -857,7 +889,7 @@ function setupDrop() {
 
 async function main() {
   const scriptAt = performance.now();
-  const updated = storageGet(UPDATING_KEY) === '1';
+  const notes = bootNotes(storageGet(UPDATING_KEY) === '1');
   storageSet(UPDATING_KEY, null);
   applyTheme(settings);
   setupServiceWorker();
@@ -885,7 +917,10 @@ async function main() {
   }).observe($('frame'));
 
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') return savePositionNow();
+    if (document.visibilityState === 'hidden') {
+      storageSet(HIDDEN_AT_KEY, String(Date.now()));
+      return savePositionNow();
+    }
     updateDropboxRow(); // 認証の戻りが Chrome のタブに開いたときは、アプリへ戻ったここで反映する
     if (Date.now() - lastSyncAt >= SYNC_INTERVAL_MS) autoSyncDropbox();
   });
@@ -905,6 +940,8 @@ async function main() {
   const fromDropbox = params.has('code') || params.has('error');
   await finishDropboxAuth(params);
   const slowData = setTimeout(() => showBoot('端末に保存したデータの応答を待っています…'), SLOW_DATA_MS);
+  await store.ready();
+  const openAt = performance.now();
 
   let target = null;
   try {
@@ -913,6 +950,7 @@ async function main() {
     console.error(e);
     toast('受け取ったファイルを読めませんでした');
   }
+  const inboxAt = performance.now();
   const last = storageGet(LAST_DOC_KEY);
   const lastDoc = last && !params.has('shared') && !fromDropbox && !target ? await store.getDoc(last) : null;
   const dataAt = performance.now();
@@ -921,7 +959,7 @@ async function main() {
   else if (lastDoc) await openDoc(last);
   else await showLibrary();
   $('boot').hidden = true;
-  recordBoot({ scriptAt, dataAt }, updated);
+  recordBoot({ scriptAt, openAt, inboxAt, dataAt }, notes);
   autoSyncDropbox(); // 待たない。古い版のまま先に読み始められる
 }
 

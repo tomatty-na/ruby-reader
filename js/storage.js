@@ -41,8 +41,33 @@ async function write(names, fill) {
   const tx = db.transaction(names, 'readwrite');
   fill(tx);
   tx.commit?.();
-  await done(tx);
+  markPendingWrite([names].flat().join(','));
+  await done(tx).finally(() => markPendingWrite(null));
 }
+
+// 書き込みの途中でページが終わったかを、次の起動で知るための印（起動が遅いときの手がかり）。service worker には localStorage がない
+const PENDING_WRITE_KEY = 'ruby-reader-pending-write';
+
+function markPendingWrite(label) {
+  try {
+    if (label) globalThis.localStorage?.setItem(PENDING_WRITE_KEY, label);
+    else globalThis.localStorage?.removeItem(PENDING_WRITE_KEY);
+  } catch {
+    // 手がかりが残らないだけ
+  }
+}
+
+export function takePendingWrite() {
+  try {
+    const label = globalThis.localStorage?.getItem(PENDING_WRITE_KEY) ?? null;
+    globalThis.localStorage?.removeItem(PENDING_WRITE_KEY);
+    return label;
+  } catch {
+    return null;
+  }
+}
+
+export const ready = () => openDb();
 
 export const addToInbox = (entries) =>
   write('inbox', (tx) => {

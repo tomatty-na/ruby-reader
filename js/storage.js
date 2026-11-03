@@ -67,6 +67,8 @@ export async function putDoc(doc) {
   const db = await openDb();
   const tx = db.transaction('docs', 'readwrite');
   tx.objectStore('docs').put(doc);
+  // ページを閉じる途中でも書けるように、応答を待たずに確定を指示する（pagehide からの保存が消えないように）
+  tx.commit?.();
   await done(tx);
 }
 

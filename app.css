@@ -54,6 +54,20 @@ h2 { font-size: 16px; margin: 0; }
   cursor: pointer;
 }
 button.primary-button { width: 100%; margin-bottom: 8px; border: 0; font-size: inherit; }
+#boot {
+  position: fixed;
+  z-index: 30;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--bg);
+  color: var(--muted);
+  text-align: center;
+}
+#boot-details { color: var(--muted); font-size: 13px; }
+#boot-log { margin: 8px 0 0; white-space: pre-line; }
 #dropbox-path { min-width: 0; overflow-wrap: anywhere; }
 #dropbox-note { margin: 8px 0; color: var(--muted); font-size: 14px; }
 #dropbox-note:empty { display: none; }

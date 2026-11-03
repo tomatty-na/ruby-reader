@@ -1,7 +1,7 @@
 // オフラインでの動作と、共有で届いたファイルの受け取り。ファイルは端末の外へ送らない
 import { addToInbox } from './js/storage.js';
 
-const VERSION = '7852272665'; // build.mjs が置き換える
+const VERSION = '98bcb72ae3'; // build.mjs が置き換える
 const CACHE = `ruby-reader-${VERSION}`;
 const ASSETS = [
   './',
@@ -26,7 +26,8 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(CACHE)
-      .then((cache) => cache.addAll(ASSETS))
+      // HTTP キャッシュ（GitHub Pages は10分）を通すと、公開の直後は新しい版の名前で古いファイルを保存してしまう
+      .then((cache) => cache.addAll(ASSETS.map((url) => new Request(url, { cache: 'reload' }))))
       .then(() => self.skipWaiting()),
   );
 });

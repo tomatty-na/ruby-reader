@@ -17,6 +17,9 @@ const SELECT_PRESS_MS = 350; // これより長く押していれば、文字の
 const DROPBOX_FOLDER_KEY = 'ruby-reader-dropbox-folder'; // 最後に見たフォルダ
 const DOWNLOAD_LIMIT = 4; // 同時に取得するファイルの数
 const SYNC_INTERVAL_MS = 30_000; // アプリへ戻るたびに問い合わせないよう、間を空ける
+const BOOT_LOG_KEY = 'ruby-reader-boot-log'; // 起動にかかった時間（実機で遅いときの手がかり）
+const BOOT_LOG_SIZE = 5;
+const UPDATING_KEY = 'ruby-reader-updating'; // 新しい版へ入れ替わるための読み込み直し
 
 const settings = loadSettings();
 let current = null; // 開いている文書
@@ -272,25 +275,51 @@ function openDropboxFolder(path, entries) {
   });
 }
 
-let syncing = false;
+let syncRun = null;
 let lastSyncAt = 0;
 
-// 開いているファイルも含めて、Dropbox で変わったものを新しくする。通信できないときは端末の版のまま読める
-async function syncDropbox() {
-  if (!dropbox.connected || syncing) return;
-  syncing = true;
-  lastSyncAt = Date.now();
-  try {
+// 開いているファイルも含めて、Dropbox で変わったものを新しくする。戻り値は新しくした数
+function syncDropbox() {
+  syncRun ??= (async () => {
+    lastSyncAt = Date.now();
     const changes = await findChanges(dropbox, await store.getDocs(), await store.getBooks());
-    if (changes.length) await applyDropboxChanges(changes);
+    return changes.length ? applyDropboxChanges(changes) : 0;
+  })().finally(() => (syncRun = null));
+  return syncRun;
+}
+
+// 通信できないときは端末の版のまま読めるので、接続が切れたときだけ知らせる
+async function autoSyncDropbox() {
+  if (!dropbox.connected) return;
+  try {
+    await syncDropbox();
   } catch (e) {
     console.error(e);
     if (!dropbox.connected) {
       toast(e.message, 8000);
       updateDropboxRow();
+      updateRefreshButton();
     }
+  }
+}
+
+function updateRefreshButton() {
+  $('refresh').hidden = !(dropbox.connected && (current?.dropbox || currentBook?.dropbox));
+}
+
+async function refreshNow() {
+  const button = $('refresh');
+  button.disabled = true;
+  button.textContent = '更新中';
+  try {
+    if (!(await syncDropbox())) toast('Dropboxの内容と同じです', 2500);
+  } catch (e) {
+    console.error(e);
+    toast(e.message, 8000);
   } finally {
-    syncing = false;
+    button.disabled = false;
+    button.textContent = '更新';
+    updateRefreshButton();
   }
 }
 
@@ -306,7 +335,7 @@ async function applyDropboxChanges(changes) {
     if (bookId) writes.push(newDoc({ id: crypto.randomUUID(), bookId, ...file }, now));
     else if (docs.has(docId)) writes.push({ ...docs.get(docId), ...file, receivedAt: now });
   }
-  if (!writes.length) return;
+  if (!writes.length) return 0;
 
   // savePositionNow は current を丸ごと保存するので、保存より前に current も新しくする
   const shown = current && writes.find((w) => w.id === current.id);
@@ -324,6 +353,7 @@ async function applyDropboxChanges(changes) {
   }
   if (current) await updateChapterButtons();
   else if (!$('library').hidden) await showLibrary();
+  return writes.length;
 }
 
 // ---- 一覧
@@ -445,6 +475,7 @@ async function openDoc(id, { atEnd = false, pushHistory = true } = {}) {
   await renderCurrent();
   reader.restore(doc.position, { atEnd });
   await updateChapterButtons();
+  updateRefreshButton();
   if (pushHistory && history.state?.view !== 'reader') history.pushState({ view: 'reader' }, '');
   if (currentBook) {
     currentBook.lastDocId = id;
@@ -712,6 +743,7 @@ function syncSettingsForm() {
     else out.textContent = key === 'fontSize' || key === 'margin' ? `${settings[key]}px` : Number(settings[key]).toFixed(1);
   }
   $('custom-colors').hidden = settings.theme !== 'custom';
+  $('boot-log').textContent = readBootLog().join('\n');
   const inReader = Boolean(current);
   $('bracket-row').hidden = !inReader;
   if (inReader) {
@@ -769,18 +801,45 @@ function setupSettings() {
 
 // ---- 起動
 
+function readBootLog() {
+  try {
+    return JSON.parse(storageGet(BOOT_LOG_KEY) ?? '[]');
+  } catch {
+    return [];
+  }
+}
+
+// marks: スクリプトが動き始めた時刻、保存データを読み終えた時刻。ページを開いてからの ms
+function recordBoot({ scriptAt, dataAt }, updated) {
+  const seconds = (ms) => (ms / 1000).toFixed(1);
+  const now = performance.now();
+  const line = `${formatDate(Date.now())} 計${seconds(now)}秒（読み込み ${seconds(scriptAt)} / 保存データ ${seconds(dataAt - scriptAt)} / 表示 ${seconds(now - dataAt)}）${updated ? ' 更新の直後' : ''}`;
+  storageSet(BOOT_LOG_KEY, JSON.stringify([line, ...readBootLog()].slice(0, BOOT_LOG_SIZE)));
+}
+
+function showBoot(message) {
+  $('boot').textContent = message;
+  $('boot').hidden = false;
+}
+
 function setupServiceWorker() {
   if (!('serviceWorker' in navigator)) return;
   const hadController = Boolean(navigator.serviceWorker.controller);
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     // 新しい版に入れ替わったら読み込み直す（位置は保存されている）
-    if (hadController) savePositionNow().finally(() => location.reload());
+    if (!hadController) return;
+    showBoot('新しい版に更新しています…');
+    storageSet(UPDATING_KEY, '1');
+    savePositionNow().finally(() => location.reload());
   });
   navigator.serviceWorker.addEventListener('message', (e) => {
     if (e.data?.version) $('version').textContent = `版: ${e.data.version}`;
   });
-  navigator.serviceWorker.register('sw.js', { type: 'module' }).then((reg) => {
+  navigator.serviceWorker.register('sw.js', { type: 'module', updateViaCache: 'none' }).then((reg) => {
     (reg.active ?? reg.installing ?? reg.waiting)?.postMessage('version');
+    reg.addEventListener('updatefound', () => {
+      if (reg.active) toast('新しい版を準備しています…', 8000);
+    });
   });
   navigator.serviceWorker.ready.then((reg) => reg.active?.postMessage('version'));
 }
@@ -794,6 +853,9 @@ function setupDrop() {
 }
 
 async function main() {
+  const scriptAt = performance.now();
+  const updated = storageGet(UPDATING_KEY) === '1';
+  storageSet(UPDATING_KEY, null);
   applyTheme(settings);
   setupServiceWorker();
   setupGestures();
@@ -806,6 +868,7 @@ async function main() {
   });
   $('dropbox-toggle').addEventListener('click', toggleDropbox);
   $('dropbox-open').addEventListener('click', openDropboxBrowser);
+  $('refresh').addEventListener('click', refreshNow);
   $('back').addEventListener('click', () => history.back());
   $('open-toc').addEventListener('click', openToc);
   $('next-chapter').addEventListener('click', () => moveChapter(1));
@@ -821,7 +884,7 @@ async function main() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') return savePositionNow();
     updateDropboxRow(); // 認証の戻りが Chrome のタブに開いたときは、アプリへ戻ったここで反映する
-    if (Date.now() - lastSyncAt >= SYNC_INTERVAL_MS) syncDropbox();
+    if (Date.now() - lastSyncAt >= SYNC_INTERVAL_MS) autoSyncDropbox();
   });
   window.addEventListener('pagehide', () => savePositionNow());
   window.addEventListener('popstate', () => {
@@ -847,10 +910,17 @@ async function main() {
     toast('受け取ったファイルを読めませんでした');
   }
   const last = storageGet(LAST_DOC_KEY);
+  const lastDoc = last && !params.has('shared') && !fromDropbox && !target ? await store.getDoc(last) : null;
+  const dataAt = performance.now();
   if (target) await openDoc(target);
-  else if (last && !params.has('shared') && !fromDropbox && (await store.getDoc(last))) await openDoc(last);
+  else if (lastDoc) await openDoc(last);
   else await showLibrary();
-  syncDropbox(); // 待たない。古い版のまま先に読み始められる
+  $('boot').hidden = true;
+  recordBoot({ scriptAt, dataAt }, updated);
+  autoSyncDropbox(); // 待たない。古い版のまま先に読み始められる
 }
 
-main();
+main().catch((e) => {
+  console.error(e);
+  showBoot(`起動できませんでした（${e.message}）`);
+});

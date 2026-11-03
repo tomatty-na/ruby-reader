@@ -12,6 +12,8 @@
 </head>
 <body>
 
+<div id="boot" role="status">読み込み中…</div>
+
 <section id="library" hidden>
   <header class="library-head">
     <h1>ルビリーダー</h1>
@@ -51,6 +53,7 @@
       <div id="title"></div>
       <div id="received"></div>
     </div>
+    <button id="refresh" type="button" class="icon-button" hidden>更新</button>
     <button id="open-toc" type="button" class="icon-button">目次</button>
     <button id="open-settings" type="button" class="icon-button">設定</button>
   </header>
@@ -131,6 +134,10 @@
       </select>
     </label>
     <p id="version"></p>
+    <details id="boot-details">
+      <summary>起動にかかった時間</summary>
+      <p id="boot-log"></p>
+    </details>
   </form>
 </dialog>
 

@@ -6,6 +6,7 @@ const APP_KEY = '1qq22hn8p6n8io5';
 const AUTHORIZE_URL = 'https://www.dropbox.com/oauth2/authorize';
 const TOKEN_URL = 'https://api.dropboxapi.com/oauth2/token';
 const API_URL = 'https://api.dropboxapi.com/2/';
+const CONTENT_URL = 'https://content.dropboxapi.com/2/';
 const SCOPES = 'files.metadata.read files.content.read';
 const TOKENS_KEY = 'ruby-reader-dropbox-tokens';
 const PENDING_KEY = 'ruby-reader-dropbox-pending';
@@ -17,6 +18,42 @@ const randomString = () => base64url(crypto.getRandomValues(new Uint8Array(32)))
 export async function codeChallenge(verifier) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
   return base64url(new Uint8Array(digest));
+}
+
+// HTTP ヘッダーには ASCII しか入れられないので、それ以外は \uXXXX にする
+const headerJson = (value) => JSON.stringify(value).replace(/[\u007f-￿]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+
+// content_hash は内容が同じなら変わらないが、返らないこともある
+export const versionOf = (entry) => entry.content_hash ?? entry.rev;
+export const isTextFile = (entry) => entry['.tag'] === 'file' && /\.txt$/i.test(entry.name);
+export const linkOf = (entry) => ({ id: entry.id, path: entry.path_display, version: versionOf(entry) });
+
+const isStale = (doc, entry) => doc.dropbox.version !== versionOf(entry) || doc.name !== entry.name;
+
+// 取得し直すファイルを探す（本文は取得しない）。Dropbox で消えたものは端末に残す
+// 戻り値: { entry, docId }（既存の更新）または { entry, bookId }（束のフォルダに増えたファイル）の配列
+export async function findChanges(client, docs, books) {
+  const changes = [];
+  const skipGone = (e) => {
+    if (e.status !== 409) throw e;
+    return null;
+  };
+  const folderBooks = books.filter((b) => b.dropbox && docs.some((d) => d.bookId === b.id));
+  for (const book of folderBooks) {
+    const entries = await client.listFolder(book.dropbox.ref).catch(skipGone);
+    const members = docs.filter((d) => d.bookId === book.id);
+    for (const entry of (entries ?? []).filter(isTextFile)) {
+      const doc = members.find((d) => d.dropbox?.id === entry.id);
+      if (!doc) changes.push({ entry, bookId: book.id });
+      else if (isStale(doc, entry)) changes.push({ entry, docId: doc.id });
+    }
+  }
+  const inFolderBook = new Set(folderBooks.map((b) => b.id));
+  for (const doc of docs.filter((d) => d.dropbox && !inFolderBook.has(d.bookId))) {
+    const entry = await client.getMetadata(doc.dropbox.id).catch(skipGone);
+    if (entry && isStale(doc, entry)) changes.push({ entry, docId: doc.id });
+  }
+  return changes;
 }
 
 export class DropboxClient {
@@ -101,17 +138,37 @@ export class DropboxClient {
     return entries;
   }
 
+  getMetadata(ref) {
+    return this.rpc('files/get_metadata', { path: ref });
+  }
+
+  // ref はパスまたは ID。メタデータは本文と同じ版のものが返る
+  async download(ref) {
+    const res = await this.authorized((token) =>
+      this.request(`${CONTENT_URL}files/download`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Dropbox-API-Arg': headerJson({ path: ref }) },
+      }),
+    );
+    return { blob: await res.blob(), metadata: JSON.parse(res.headers.get('Dropbox-API-Result')) };
+  }
+
   async rpc(endpoint, args) {
-    const call = async (token) =>
+    const res = await this.authorized((token) =>
       this.request(`${API_URL}${endpoint}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(args),
-      });
-    let res = await call(await this.accessToken());
-    if (res.status === 401) res = await call(await this.refresh()); // 期限内でも取り消されていることがある
-    if (!res.ok) throw await this.failure(res);
+      }),
+    );
     return res.json();
+  }
+
+  async authorized(send) {
+    let res = await send(await this.accessToken());
+    if (res.status === 401) res = await send(await this.refresh()); // 期限内でも取り消されていることがある
+    if (!res.ok) throw await this.failure(res);
+    return res;
   }
 
   tokens() {
@@ -162,6 +219,6 @@ export class DropboxClient {
 
   async failure(res) {
     const detail = (await res.text().catch(() => '')).slice(0, 200);
-    return new Error(`Dropboxの呼び出しに失敗しました（${res.status}: ${detail}）`);
+    return Object.assign(new Error(`Dropboxの呼び出しに失敗しました（${res.status}: ${detail}）`), { status: res.status });
   }
 }

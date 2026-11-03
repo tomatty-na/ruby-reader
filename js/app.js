@@ -1,6 +1,6 @@
 // 画面の組み立て: 一覧、本文、設定、ファイルの取り込み
 import { decodeBytes } from './decode.js';
-import { DropboxClient } from './dropbox.js';
+import { DropboxClient, findChanges, isTextFile, linkOf, versionOf } from './dropbox.js';
 import { compareNames, planIncoming } from './library.js';
 import { Reader } from './reader.js';
 import { detectBracket, splitLines } from './ruby.js';
@@ -14,6 +14,9 @@ const TAP_MOVE_LIMIT = 10;
 const SWIPE_MIN = 40;
 const LONG_PRESS_MS = 500;
 const SELECT_PRESS_MS = 350; // これより長く押していれば、文字の選択を許す（Android の長押しの判定より短くする）
+const DROPBOX_FOLDER_KEY = 'ruby-reader-dropbox-folder'; // 最後に見たフォルダ
+const DOWNLOAD_LIMIT = 4; // 同時に取得するファイルの数
+const SYNC_INTERVAL_MS = 30_000; // アプリへ戻るたびに問い合わせないよう、間を空ける
 
 const settings = loadSettings();
 let current = null; // 開いている文書
@@ -69,17 +72,21 @@ const displayName = (name) => name.replace(/\.txt$/i, '');
 
 // ---- 取り込み
 
-async function ingest(files) {
+const newDoc = (fields, now) => ({ ...fields, receivedAt: now, openedAt: 0, position: null, progress: 0 });
+
+// folder: 束を Dropbox のフォルダと結び付けるときの情報
+async function ingest(files, { title, folder } = {}) {
   const docs = await store.getDocs();
   const books = await store.getBooks();
-  const plan = planIncoming(files, docs, books, () => crypto.randomUUID());
+  const plan = planIncoming(files, docs, books, () => crypto.randomUUID(), { title });
   const now = Date.now();
   const byId = new Map(docs.map((d) => [d.id, d]));
   const docWrites = [
-    ...plan.updates.map((u) => ({ ...byId.get(u.id), text: u.text, bookId: u.bookId, receivedAt: now })),
-    ...plan.creates.map((c) => ({ ...c, receivedAt: now, openedAt: 0, position: null, progress: 0 })),
+    ...plan.updates.map((u) => ({ ...byId.get(u.id), ...u, receivedAt: now })),
+    ...plan.creates.map((c) => newDoc(c, now)),
   ];
   const bookWrites = plan.newBook ? [{ ...plan.newBook, createdAt: now, lastDocId: plan.openId, bracket: 'auto' }] : [];
+  if (folder && plan.bookId) bookWrites[0] = { ...(bookWrites[0] ?? books.find((b) => b.id === plan.bookId)), dropbox: folder };
   await store.saveAll(docWrites, bookWrites);
   navigator.storage?.persist?.();
 
@@ -93,7 +100,7 @@ async function readFiles(fileLikes) {
   const results = [];
   for (const f of fileLikes) {
     try {
-      results.push({ name: f.name, text: decodeBytes(new Uint8Array(await f.blob.arrayBuffer())) });
+      results.push({ name: f.name, text: decodeBytes(new Uint8Array(await f.blob.arrayBuffer())), dropbox: f.dropbox });
     } catch (e) {
       toast(`${f.name}: ${e.message}`);
     }
@@ -132,6 +139,7 @@ const dropbox = new DropboxClient({ storage: { get: storageGet, set: storageSet 
 
 function updateDropboxRow() {
   $('dropbox').hidden = !dropbox.configured;
+  $('dropbox-open').hidden = !dropbox.connected;
   $('dropbox-status').textContent = dropbox.connected ? 'Dropboxと接続済み' : 'Dropboxと未接続';
   $('dropbox-toggle').textContent = dropbox.connected ? '切断' : '接続';
 }
@@ -156,6 +164,166 @@ async function finishDropboxAuth(params) {
     console.error(e);
     toast(e.message, 8000);
   }
+}
+
+// 本文を取得して、readFiles で読める形にして返す
+async function downloadEntries(entries, onProgress) {
+  const downloaded = [];
+  let next = 0;
+  const worker = async () => {
+    while (next < entries.length) {
+      const { blob, metadata } = await dropbox.download(entries[next++].id);
+      downloaded.push({ name: metadata.name, blob, dropbox: linkOf(metadata) });
+      onProgress?.(downloaded.length);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(DOWNLOAD_LIMIT, entries.length) }, worker));
+  return readFiles(downloaded);
+}
+
+let browseSeq = 0; // フォルダを続けて開いたときに、古い結果を捨てる
+
+const parentPath = (path) => path.slice(0, path.lastIndexOf('/'));
+// 原稿は作品のフォルダの下の text などにあるので、1つ上の名前まで題名に入れる
+const folderTitle = (path) => path.split('/').filter(Boolean).slice(-2).join(' / ') || 'Dropbox';
+const setDropboxNote = (text) => ($('dropbox-note').textContent = text);
+
+function openDropboxBrowser() {
+  $('dropbox-dialog').showModal();
+  return showDropboxFolder(storageGet(DROPBOX_FOLDER_KEY) ?? '');
+}
+
+async function showDropboxFolder(path) {
+  const seq = ++browseSeq;
+  const list = $('dropbox-list');
+  list.textContent = '';
+  $('dropbox-path').textContent = path || 'Dropbox';
+  $('dropbox-up').hidden = !path;
+  $('dropbox-up').onclick = () => showDropboxFolder(parentPath(path));
+  $('dropbox-bundle').hidden = true;
+  setDropboxNote('読み込んでいます…');
+  let entries;
+  try {
+    entries = await dropbox.listFolder(path);
+  } catch (e) {
+    if (seq !== browseSeq) return;
+    // 覚えていたフォルダが移動や削除でなくなったときは、最上位から選び直す
+    if (e.status === 409 && path) return showDropboxFolder('');
+    console.error(e);
+    setDropboxNote(e.message);
+    updateDropboxRow();
+    return;
+  }
+  if (seq !== browseSeq) return;
+  storageSet(DROPBOX_FOLDER_KEY, path);
+
+  const byName = (a, b) => compareNames(a.name, b.name);
+  const folders = entries.filter((e) => e['.tag'] === 'folder').sort(byName);
+  const files = entries.filter(isTextFile).sort(byName);
+  setDropboxNote(folders.length || files.length ? '' : 'フォルダとtxtファイルはありません');
+  for (const f of folders) list.append(tocButton(f.name, 'フォルダ', false, () => showDropboxFolder(f.path_display)));
+  for (const f of files) list.append(tocButton(displayName(f.name), `更新 ${formatDate(Date.parse(f.server_modified))}`, false, () => openDropboxFile(f)));
+  if (files.length > 1) {
+    const bundle = $('dropbox-bundle');
+    bundle.hidden = false;
+    bundle.textContent = `このフォルダをまとめて開く（${files.length}件）`;
+    bundle.onclick = () => openDropboxFolder(path, files);
+  }
+}
+
+async function runDropboxOpen(load) {
+  const seq = ++browseSeq;
+  setDropboxNote('読み込んでいます…');
+  try {
+    const id = await load();
+    if (seq !== browseSeq) return;
+    $('dropbox-dialog').close();
+    if (id) await openDoc(id);
+  } catch (e) {
+    console.error(e);
+    if (seq === browseSeq) setDropboxNote(e.message);
+  }
+}
+
+function openDropboxFile(entry) {
+  return runDropboxOpen(async () => {
+    // 同じ版を持っていれば取得しない
+    const saved = (await store.getDocs()).find((d) => d.dropbox?.id === entry.id && d.dropbox.version === versionOf(entry) && d.name === entry.name);
+    if (saved) return saved.id;
+    const files = await downloadEntries([entry]);
+    return files.length ? ingest(files) : null;
+  });
+}
+
+function openDropboxFolder(path, entries) {
+  return runDropboxOpen(async () => {
+    const folder = { ref: path ? (await dropbox.getMetadata(path)).id : '' };
+    // 同じ版を持っているファイルは取得しない
+    const docs = await store.getDocs();
+    const savedDoc = (entry) => docs.find((d) => d.dropbox?.id === entry.id && d.dropbox.version === versionOf(entry) && d.name === entry.name);
+    const missing = entries.filter((e) => !savedDoc(e));
+    const fetched = await downloadEntries(missing, (n) => setDropboxNote(`読み込んでいます…（${n} / ${missing.length}）`));
+    const saved = entries.filter(savedDoc).map((e) => {
+      const { name, text, dropbox: link } = savedDoc(e);
+      return { name, text, dropbox: link };
+    });
+    const files = [...saved, ...fetched];
+    return files.length ? ingest(files, { title: folderTitle(path), folder }) : null;
+  });
+}
+
+let syncing = false;
+let lastSyncAt = 0;
+
+// 開いているファイルも含めて、Dropbox で変わったものを新しくする。通信できないときは端末の版のまま読める
+async function syncDropbox() {
+  if (!dropbox.connected || syncing) return;
+  syncing = true;
+  lastSyncAt = Date.now();
+  try {
+    const changes = await findChanges(dropbox, await store.getDocs(), await store.getBooks());
+    if (changes.length) await applyDropboxChanges(changes);
+  } catch (e) {
+    console.error(e);
+    if (!dropbox.connected) {
+      toast(e.message, 8000);
+      updateDropboxRow();
+    }
+  } finally {
+    syncing = false;
+  }
+}
+
+async function applyDropboxChanges(changes) {
+  const files = new Map((await downloadEntries(changes.map((c) => c.entry))).map((f) => [f.dropbox.id, f]));
+  await savePositionNow();
+  const docs = new Map((await store.getDocs()).map((d) => [d.id, d]));
+  const now = Date.now();
+  const writes = [];
+  for (const { entry, docId, bookId } of changes) {
+    const file = files.get(entry.id);
+    if (!file) continue;
+    if (bookId) writes.push(newDoc({ id: crypto.randomUUID(), bookId, ...file }, now));
+    else if (docs.has(docId)) writes.push({ ...docs.get(docId), ...file, receivedAt: now });
+  }
+  if (!writes.length) return;
+
+  // savePositionNow は current を丸ごと保存するので、保存より前に current も新しくする
+  const shown = current && writes.find((w) => w.id === current.id);
+  const position = shown ? reader.capture() : null;
+  if (shown) current = { ...current, name: shown.name, text: shown.text, dropbox: shown.dropbox, receivedAt: now };
+  await store.saveAll(writes, []);
+
+  if (shown) {
+    await renderCurrent();
+    reader.restore(position);
+    showDocHeader(current);
+    toast('内容を新しくしました。読んでいた位置に戻ります');
+  } else {
+    toast(`Dropboxの${writes.length}件を新しくしました`);
+  }
+  if (current) await updateChapterButtons();
+  else if (!$('library').hidden) await showLibrary();
 }
 
 // ---- 一覧
@@ -254,6 +422,12 @@ async function renderCurrent() {
   reader.layout(settings);
 }
 
+function showDocHeader(doc) {
+  $('title').textContent = displayName(doc.name);
+  $('received').textContent = `受信 ${formatDate(doc.receivedAt)}`;
+  document.title = displayName(doc.name);
+}
+
 async function openDoc(id, { atEnd = false, pushHistory = true } = {}) {
   await savePositionNow();
   const doc = await store.getDoc(id);
@@ -266,9 +440,7 @@ async function openDoc(id, { atEnd = false, pushHistory = true } = {}) {
   $('library').hidden = true;
   $('reader').hidden = false;
   hideBars();
-  $('title').textContent = displayName(doc.name);
-  $('received').textContent = `受信 ${formatDate(doc.receivedAt)}`;
-  document.title = displayName(doc.name);
+  showDocHeader(doc);
 
   await renderCurrent();
   reader.restore(doc.position, { atEnd });
@@ -633,6 +805,7 @@ async function main() {
     e.target.value = '';
   });
   $('dropbox-toggle').addEventListener('click', toggleDropbox);
+  $('dropbox-open').addEventListener('click', openDropboxBrowser);
   $('back').addEventListener('click', () => history.back());
   $('open-toc').addEventListener('click', openToc);
   $('next-chapter').addEventListener('click', () => moveChapter(1));
@@ -646,8 +819,9 @@ async function main() {
   }).observe($('frame'));
 
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') savePositionNow();
-    else updateDropboxRow(); // 認証の戻りが Chrome のタブに開いたときは、アプリへ戻ったここで反映する
+    if (document.visibilityState === 'hidden') return savePositionNow();
+    updateDropboxRow(); // 認証の戻りが Chrome のタブに開いたときは、アプリへ戻ったここで反映する
+    if (Date.now() - lastSyncAt >= SYNC_INTERVAL_MS) syncDropbox();
   });
   window.addEventListener('pagehide', () => savePositionNow());
   window.addEventListener('popstate', () => {
@@ -676,6 +850,7 @@ async function main() {
   if (target) await openDoc(target);
   else if (last && !params.has('shared') && !fromDropbox && (await store.getDoc(last))) await openDoc(last);
   else await showLibrary();
+  syncDropbox(); // 待たない。古い版のまま先に読み始められる
 }
 
 main();

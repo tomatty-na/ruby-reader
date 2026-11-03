@@ -1,7 +1,7 @@
 // オフラインでの動作と、共有で届いたファイルの受け取り。ファイルは端末の外へ送らない
 import { addToInbox } from './js/storage.js';
 
-const VERSION = '328fe42c3d'; // build.mjs が置き換える
+const VERSION = '75270ef388'; // build.mjs が置き換える
 const CACHE = `ruby-reader-${VERSION}`;
 const ASSETS = [
   './',

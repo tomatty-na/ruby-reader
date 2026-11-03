@@ -17,6 +17,7 @@
     <h1>ルビリーダー</h1>
     <button id="library-settings" type="button" class="icon-button" aria-label="設定">設定</button>
   </header>
+  <button id="dropbox-open" type="button" class="primary-button" hidden>Dropboxから開く</button>
   <label class="primary-button">
     ファイルを開く
     <input id="file-input" type="file" accept=".txt,text/plain" multiple hidden>
@@ -27,7 +28,7 @@
   </div>
   <ul id="doc-list"></ul>
   <div id="empty" hidden>
-    <h2>Dropboxから開く</h2>
+    <h2>Dropboxの共有から開く</h2>
     <ol>
       <li>このアプリをホーム画面に追加する（Chromeのメニューから）</li>
       <li>Dropboxでファイルの「⋯」から「共有」を開く</li>
@@ -67,6 +68,17 @@
   </div>
   <div id="toc-chapters"></div>
   <div id="toc-headings"></div>
+</dialog>
+
+<dialog id="dropbox-dialog" class="sheet">
+  <div class="sheet-head">
+    <h2 id="dropbox-path"></h2>
+    <button type="button" class="icon-button" data-close>閉じる</button>
+  </div>
+  <button id="dropbox-up" type="button" class="icon-button" hidden>上のフォルダへ</button>
+  <button id="dropbox-bundle" type="button" class="primary-button" hidden></button>
+  <p id="dropbox-note" role="status"></p>
+  <div id="dropbox-list"></div>
 </dialog>
 
 <dialog id="settings-dialog" class="sheet">

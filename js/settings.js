@@ -8,6 +8,7 @@ export const DEFAULTS = {
   fontSize: 18,
   lineHeight: 1.9,
   margin: 16,
+  botenSize: 0.4,
   font: 'mincho',
   theme: 'auto',
   customFg: '#d8d6d0',
@@ -36,6 +37,7 @@ export function applyTheme(settings) {
   root.dataset.writing = settings.writing;
   root.dataset.flow = settings.flow;
   root.style.setProperty('--font-size', `${settings.fontSize}px`);
+  root.style.setProperty('--boten-size', settings.botenSize);
   root.style.setProperty('--reading-font', settings.font === 'gothic' ? 'var(--font-gothic)' : 'var(--font-mincho)');
   if (settings.theme === 'custom') {
     root.style.setProperty('--bg', settings.customBg);

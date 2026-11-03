@@ -12,6 +12,7 @@ const HEADING = /^[\s　]*(\d+|第.{1,8}[章話部節])[\s　]*$/;
 const TAP_MOVE_LIMIT = 10;
 const SWIPE_MIN = 40;
 const LONG_PRESS_MS = 500;
+const SELECT_PRESS_MS = 350; // これより長く押していれば、文字の選択を許す（Android の長押しの判定より短くする）
 
 const settings = loadSettings();
 let current = null; // 開いている文書
@@ -340,22 +341,60 @@ function handleTap(x, y) {
 function setupGestures() {
   const frame = $('frame');
   let start = null;
-  frame.addEventListener('pointerdown', (e) => {
-    start = { x: e.clientX, y: e.clientY, t: e.timeStamp };
+  let pressTimer = 0;
+  let longPressed = false; // 今の押下が長押しになったか
+  let pointerType = 'mouse';
+
+  const selection = () => window.getSelection();
+  const selectingInText = () => {
+    const sel = selection();
+    return !sel.isCollapsed && $('content').contains(sel.anchorNode);
+  };
+  // タッチで文字を選択してよいのは長押しのときだけ（マウスのドラッグや PC のキー操作はそのまま）
+  const selectionAllowed = () => pointerType === 'mouse' || longPressed;
+
+  frame.addEventListener('selectstart', (e) => {
+    if (!selectionAllowed() && selection().isCollapsed) e.preventDefault();
   });
-  frame.addEventListener('pointercancel', () => (start = null));
+  document.addEventListener('selectionchange', () => {
+    if (!selectionAllowed() && selectingInText()) selection().removeAllRanges();
+  });
+  frame.addEventListener('mousedown', (e) => {
+    // ページめくりのクリックが続いて、ダブルクリックの単語選択にならないようにする
+    if (settings.flow === 'page' && e.detail > 1) e.preventDefault();
+  });
+
+  frame.addEventListener('pointerdown', (e) => {
+    pointerType = e.pointerType;
+    start = { x: e.clientX, y: e.clientY, t: e.timeStamp, hadSelection: selectingInText() };
+    longPressed = false;
+    clearTimeout(pressTimer);
+    pressTimer = setTimeout(() => (longPressed = true), SELECT_PRESS_MS);
+  });
+  frame.addEventListener('pointermove', (e) => {
+    if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) >= TAP_MOVE_LIMIT) clearTimeout(pressTimer);
+  });
+  frame.addEventListener('pointercancel', () => {
+    clearTimeout(pressTimer);
+    start = null;
+  });
   frame.addEventListener('pointerup', (e) => {
+    clearTimeout(pressTimer);
     if (!start) return;
+    const { hadSelection } = start;
     const dx = e.clientX - start.x;
     const dy = e.clientY - start.y;
     const longPress = e.timeStamp - start.t > LONG_PRESS_MS;
     start = null;
-    const selecting = !window.getSelection().isCollapsed;
+    if (longPress) return;
     if (Math.abs(dx) < TAP_MOVE_LIMIT && Math.abs(dy) < TAP_MOVE_LIMIT) {
-      if (!longPress && !selecting) handleTap(e.clientX, e.clientY);
+      // 選択中のタップは選択の解除だけにする
+      if (hadSelection) selection().removeAllRanges();
+      else handleTap(e.clientX, e.clientY);
       return;
     }
-    if (settings.flow !== 'page' || selecting || barsVisible()) return;
+    // マウスのドラッグは文字の選択
+    if (settings.flow !== 'page' || hadSelection || barsVisible() || selectingInText()) return;
     if (Math.abs(dx) >= SWIPE_MIN && Math.abs(dx) > Math.abs(dy)) {
       // 縦書きは右へ払うと次へ、横書きは左へ払うと次へ
       const toNext = settings.writing === 'vertical' ? dx > 0 : dx < 0;
@@ -463,7 +502,8 @@ function syncSettingsForm() {
   }
   for (const out of form.querySelectorAll('output[data-for]')) {
     const key = out.dataset.for;
-    out.textContent = key === 'fontSize' || key === 'margin' ? `${settings[key]}px` : Number(settings[key]).toFixed(1);
+    if (key === 'botenSize') out.textContent = `${Math.round(settings[key] * 100)}%`;
+    else out.textContent = key === 'fontSize' || key === 'margin' ? `${settings[key]}px` : Number(settings[key]).toFixed(1);
   }
   $('custom-colors').hidden = settings.theme !== 'custom';
   const inReader = Boolean(current);

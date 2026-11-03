@@ -6,6 +6,7 @@
   --reading-font: var(--font-mincho);
   --font-size: 18px;
   --line-px: 34px;
+  --boten-size: 0.4;
   color-scheme: light;
 }
 :root[data-theme="dark"] { --bg: #16161a; --fg: #d8d6d0; color-scheme: dark; }
@@ -73,7 +74,7 @@ h2 { font-size: 16px; margin: 0; }
 
 /* 本文 */
 #reader { position: fixed; inset: 0; overflow: hidden; }
-#frame { position: absolute; inset: 0; }
+#frame { position: absolute; inset: 0; -webkit-tap-highlight-color: transparent; }
 #scroller {
   position: absolute;
   overflow: hidden;
@@ -115,7 +116,18 @@ h2 { font-size: 16px; margin: 0; }
   inset-block-start: -0.18em;
   font-family: var(--reading-font);
 }
-#content .boten { text-emphasis: filled sesame; text-emphasis-position: over right; }
+/* 傍点。text-emphasis は大きさを変えられないので、1文字ずつ印を置く。行幅には影響しない */
+#content .boten-char { position: relative; }
+#content .boten-char::before {
+  content: "\FE45";
+  position: absolute;
+  inset-inline: 0;
+  inset-block-end: calc(100% - var(--font-size) * 0.19);
+  font-size: calc(var(--font-size) * var(--boten-size));
+  line-height: 1;
+  text-align: center;
+  pointer-events: none;
+}
 :root[data-writing="vertical"] #content .tcy { text-combine-upright: all; }
 #page-indicator {
   position: fixed;

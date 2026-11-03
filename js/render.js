@@ -20,7 +20,10 @@ export function lineHtml(segs) {
   return segs
     .map((s) => {
       if (s.type === 'ruby') return `<ruby>${escapeHtml(s.base)}<rt>${escapeHtml(s.ruby)}</rt></ruby>`;
-      if (s.type === 'boten') return `<span class="boten">${escapeHtml(s.base)}</span>`;
+      if (s.type === 'boten') {
+        const chars = Array.from(s.base).map((c) => `<span class="boten-char">${escapeHtml(c)}</span>`);
+        return `<span class="boten">${chars.join('')}</span>`;
+      }
       return textHtml(s.text);
     })
     .join('');

@@ -1,5 +1,6 @@
 // 画面の組み立て: 一覧、本文、設定、ファイルの取り込み
 import { decodeBytes } from './decode.js';
+import { DropboxClient } from './dropbox.js';
 import { compareNames, planIncoming } from './library.js';
 import { Reader } from './reader.js';
 import { detectBracket, splitLines } from './ruby.js';
@@ -125,6 +126,38 @@ async function openPicked(list) {
   await openDoc(id);
 }
 
+// ---- Dropbox
+
+const dropbox = new DropboxClient({ storage: { get: storageGet, set: storageSet } });
+
+function updateDropboxRow() {
+  $('dropbox').hidden = !dropbox.configured;
+  $('dropbox-status').textContent = dropbox.connected ? 'Dropboxと接続済み' : 'Dropboxと未接続';
+  $('dropbox-toggle').textContent = dropbox.connected ? '切断' : '接続';
+}
+
+async function toggleDropbox() {
+  if (!dropbox.connected) {
+    location.assign(await dropbox.authorizeUrl(new URL('./', location.href).href));
+    return;
+  }
+  if (!confirm('Dropboxとの接続を切りますか？（端末に保存したファイルは残ります）')) return;
+  await dropbox.disconnect();
+  updateDropboxRow();
+}
+
+// 認証の画面から戻ってきたときの処理。一覧の取得まで試して、接続できたことを確かめる
+async function finishDropboxAuth(params) {
+  try {
+    if (!(await dropbox.handleRedirect(params))) return;
+    const entries = await dropbox.listFolder('');
+    toast(`Dropboxに接続しました（最上位に${entries.length}件）`, 8000);
+  } catch (e) {
+    console.error(e);
+    toast(e.message, 8000);
+  }
+}
+
 // ---- 一覧
 
 function progressLabel(progress) {
@@ -138,6 +171,7 @@ async function showLibrary() {
   $('reader').hidden = true;
   $('library').hidden = false;
   document.title = 'ルビリーダー';
+  updateDropboxRow();
 
   const docs = await store.getDocs();
   const books = await store.getBooks();
@@ -598,6 +632,7 @@ async function main() {
     await openPicked(e.target.files);
     e.target.value = '';
   });
+  $('dropbox-toggle').addEventListener('click', toggleDropbox);
   $('back').addEventListener('click', () => history.back());
   $('open-toc').addEventListener('click', openToc);
   $('next-chapter').addEventListener('click', () => moveChapter(1));
@@ -612,6 +647,7 @@ async function main() {
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') savePositionNow();
+    else updateDropboxRow(); // 認証の戻りが Chrome のタブに開いたときは、アプリへ戻ったここで反映する
   });
   window.addEventListener('pagehide', () => savePositionNow());
   window.addEventListener('popstate', () => {
@@ -626,6 +662,8 @@ async function main() {
   // 一覧の上に本文を積む形にして、戻るボタンで一覧へ戻れるようにする
   const params = new URLSearchParams(location.search);
   history.replaceState({ view: 'library' }, '', location.pathname);
+  const fromDropbox = params.has('code') || params.has('error');
+  await finishDropboxAuth(params);
 
   let target = null;
   try {
@@ -636,7 +674,7 @@ async function main() {
   }
   const last = storageGet(LAST_DOC_KEY);
   if (target) await openDoc(target);
-  else if (last && !params.has('shared') && (await store.getDoc(last))) await openDoc(last);
+  else if (last && !params.has('shared') && !fromDropbox && (await store.getDoc(last))) await openDoc(last);
   else await showLibrary();
 }
 

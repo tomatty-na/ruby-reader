@@ -20,6 +20,7 @@ const SYNC_INTERVAL_MS = 30_000; // アプリへ戻るたびに問い合わせ�
 const BOOT_LOG_KEY = 'ruby-reader-boot-log'; // 起動にかかった時間（実機で遅いときの手がかり）
 const BOOT_LOG_SIZE = 5;
 const UPDATING_KEY = 'ruby-reader-updating'; // 新しい版へ入れ替わるための読み込み直し
+const SLOW_DATA_MS = 5000; // 保存データの応答がこれより遅ければ、待っていることを知らせる
 
 const settings = loadSettings();
 let current = null; // 開いている文書
@@ -901,6 +902,7 @@ async function main() {
   history.replaceState({ view: 'library' }, '', location.pathname);
   const fromDropbox = params.has('code') || params.has('error');
   await finishDropboxAuth(params);
+  const slowData = setTimeout(() => showBoot('端末に保存したデータの応答を待っています…'), SLOW_DATA_MS);
 
   let target = null;
   try {
@@ -912,6 +914,7 @@ async function main() {
   const last = storageGet(LAST_DOC_KEY);
   const lastDoc = last && !params.has('shared') && !fromDropbox && !target ? await store.getDoc(last) : null;
   const dataAt = performance.now();
+  clearTimeout(slowData);
   if (target) await openDoc(target);
   else if (lastDoc) await openDoc(last);
   else await showLibrary();

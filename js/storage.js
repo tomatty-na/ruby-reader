@@ -33,20 +33,32 @@ const result = (req) =>
     req.onerror = () => reject(req.error);
   });
 
-export async function addToInbox(entries) {
+// 書き込みは必ずここを通し、応答を待たずに確定を指示する。
+// 応答を待っているあいだにページが凍結されると、ロックを持ったまま止まり、ほかのページの読み書きまで止めてしまう。
+// ページを閉じる途中の書き込み（pagehide）が消えないようにするためにも要る
+async function write(names, fill) {
   const db = await openDb();
-  const tx = db.transaction('inbox', 'readwrite');
-  for (const e of entries) tx.objectStore('inbox').add(e);
+  const tx = db.transaction(names, 'readwrite');
+  fill(tx);
+  tx.commit?.();
   await done(tx);
 }
 
+export const addToInbox = (entries) =>
+  write('inbox', (tx) => {
+    for (const e of entries) tx.objectStore('inbox').add(e);
+  });
+
+// 起動のたびに呼ばれる。ほとんどの場合は空なので、読むだけで済ませて書き込みのロックを取らない
 export async function takeInbox() {
   const db = await openDb();
-  const tx = db.transaction('inbox', 'readwrite');
-  const store = tx.objectStore('inbox');
-  const entries = await result(store.getAll());
-  store.clear();
-  await done(tx);
+  const store = db.transaction('inbox').objectStore('inbox');
+  const [keys, entries] = await Promise.all([result(store.getAllKeys()), result(store.getAll())]);
+  if (keys.length) {
+    await write('inbox', (tx) => {
+      for (const key of keys) tx.objectStore('inbox').delete(key);
+    });
+  }
   return entries;
 }
 
@@ -63,35 +75,18 @@ export async function getDoc(id) {
   return result(db.transaction('docs').objectStore('docs').get(id));
 }
 
-export async function putDoc(doc) {
-  const db = await openDb();
-  const tx = db.transaction('docs', 'readwrite');
-  tx.objectStore('docs').put(doc);
-  // ページを閉じる途中でも書けるように、応答を待たずに確定を指示する（pagehide からの保存が消えないように）
-  tx.commit?.();
-  await done(tx);
-}
-
-export async function putBook(book) {
-  const db = await openDb();
-  const tx = db.transaction('books', 'readwrite');
-  tx.objectStore('books').put(book);
-  await done(tx);
-}
+export const putDoc = (doc) => write('docs', (tx) => tx.objectStore('docs').put(doc));
+export const putBook = (book) => write('books', (tx) => tx.objectStore('books').put(book));
 
 // 文書と束をまとめて1回で書く
-export async function saveAll(docs, books) {
-  const db = await openDb();
-  const tx = db.transaction(['docs', 'books'], 'readwrite');
-  for (const d of docs) tx.objectStore('docs').put(d);
-  for (const b of books) tx.objectStore('books').put(b);
-  await done(tx);
-}
+export const saveAll = (docs, books) =>
+  write(['docs', 'books'], (tx) => {
+    for (const d of docs) tx.objectStore('docs').put(d);
+    for (const b of books) tx.objectStore('books').put(b);
+  });
 
-export async function removeDocs(ids, bookId) {
-  const db = await openDb();
-  const tx = db.transaction(['docs', 'books'], 'readwrite');
-  for (const id of ids) tx.objectStore('docs').delete(id);
-  if (bookId) tx.objectStore('books').delete(bookId);
-  await done(tx);
-}
+export const removeDocs = (ids, bookId) =>
+  write(['docs', 'books'], (tx) => {
+    for (const id of ids) tx.objectStore('docs').delete(id);
+    if (bookId) tx.objectStore('books').delete(bookId);
+  });

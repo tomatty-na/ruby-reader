@@ -21,6 +21,7 @@ const BOOT_LOG_KEY = 'ruby-reader-boot-log'; // 起動にかかった時間（�
 const BOOT_LOG_SIZE = 5;
 const UPDATING_KEY = 'ruby-reader-updating'; // 新しい版へ入れ替わるための読み込み直し
 const SLOW_DATA_MS = 5000; // 保存データの応答がこれより遅ければ、待っていることを知らせる
+const RELOAD_WAIT_MS = 1000; // 新しい版へ入れ替わるときに、位置の保存を待つ上限
 
 const settings = loadSettings();
 let current = null; // 開いている文書
@@ -831,7 +832,8 @@ function setupServiceWorker() {
     if (!hadController) return;
     showBoot('新しい版に更新しています…');
     storageSet(UPDATING_KEY, '1');
-    savePositionNow().finally(() => location.reload());
+    // 保存データがふさがれていても入れ替えを止めない。間に合わなければ、少し前に保存した位置に戻る
+    Promise.race([savePositionNow(), new Promise((resolve) => setTimeout(resolve, RELOAD_WAIT_MS))]).finally(() => location.reload());
   });
   navigator.serviceWorker.addEventListener('message', (e) => {
     if (e.data?.version) $('version').textContent = `版: ${e.data.version}`;

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ルビリーダー</title>
+<meta name="description" content="縦書き・ルビ対応のテキストビューワー。ファイルは端末の外へ送りません。">
+<meta name="theme-color" content="#16161a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<section id="library" hidden>
+  <header class="library-head">
+    <h1>ルビリーダー</h1>
+    <button id="library-settings" type="button" class="icon-button" aria-label="設定">設定</button>
+  </header>
+  <label class="primary-button">
+    ファイルを開く
+    <input id="file-input" type="file" accept=".txt,text/plain" multiple hidden>
+  </label>
+  <ul id="doc-list"></ul>
+  <div id="empty" hidden>
+    <h2>Dropboxから開く</h2>
+    <ol>
+      <li>このアプリをホーム画面に追加する（Chromeのメニューから）</li>
+      <li>Dropboxでファイルの「⋯」から「共有」を開く</li>
+      <li>「エクスポート」（または「コピーを送信」）を選ぶ</li>
+      <li>送り先に「ルビリーダー」を選ぶ</li>
+    </ol>
+    <p>改稿したファイルは、同じ手順で送り直すと内容が新しくなり、読んでいた位置に戻ります。</p>
+    <p>ファイルはこの端末の中だけに保存します。サーバには送りません。</p>
+  </div>
+</section>
+
+<main id="reader" hidden>
+  <div id="frame">
+    <div id="scroller"><article id="content"></article></div>
+  </div>
+  <div id="page-indicator" aria-live="off"></div>
+  <header id="topbar" class="bar" hidden>
+    <button id="back" type="button" class="icon-button">一覧</button>
+    <div class="bar-title">
+      <div id="title"></div>
+      <div id="received"></div>
+    </div>
+    <button id="open-toc" type="button" class="icon-button">目次</button>
+    <button id="open-settings" type="button" class="icon-button">設定</button>
+  </header>
+  <footer id="bottombar" class="bar" hidden>
+    <button id="next-chapter" type="button" class="icon-button">次の章</button>
+    <input id="slider" type="range" min="0" max="1000" value="0" aria-label="読む位置">
+    <button id="prev-chapter" type="button" class="icon-button">前の章</button>
+  </footer>
+</main>
+
+<dialog id="toc-dialog" class="sheet">
+  <div class="sheet-head">
+    <h2>目次</h2>
+    <button type="button" class="icon-button" data-close>閉じる</button>
+  </div>
+  <div id="toc-chapters"></div>
+  <div id="toc-headings"></div>
+</dialog>
+
+<dialog id="settings-dialog" class="sheet">
+  <div class="sheet-head">
+    <h2>設定</h2>
+    <button type="button" class="icon-button" data-close>閉じる</button>
+  </div>
+  <form id="settings-form" method="dialog">
+    <label class="row">書字方向
+      <select name="writing"><option value="vertical">縦書き</option><option value="horizontal">横書き</option></select>
+    </label>
+    <label class="row">めくり方
+      <select name="flow"><option value="page">ページ</option><option value="scroll">スクロール</option></select>
+    </label>
+    <label class="row">文字サイズ <output data-for="fontSize"></output>
+      <input type="range" name="fontSize" min="12" max="40" step="1">
+    </label>
+    <label class="row">行間 <output data-for="lineHeight"></output>
+      <input type="range" name="lineHeight" min="1.5" max="2.6" step="0.1">
+    </label>
+    <label class="row">余白 <output data-for="margin"></output>
+      <input type="range" name="margin" min="0" max="48" step="2">
+    </label>
+    <label class="row">書体
+      <select name="font"><option value="mincho">明朝</option><option value="gothic">ゴシック</option></select>
+    </label>
+    <label class="row">配色
+      <select name="theme">
+        <option value="auto">端末に合わせる</option>
+        <option value="light">ライト</option>
+        <option value="sepia">セピア</option>
+        <option value="dark">ダーク</option>
+        <option value="black">黒</option>
+        <option value="custom">自分で選ぶ</option>
+      </select>
+    </label>
+    <div id="custom-colors" class="row" hidden>
+      <label>文字色 <input type="color" name="customFg"></label>
+      <label>背景色 <input type="color" name="customBg"></label>
+    </div>
+    <label class="row" id="bracket-row">ルビの書式（この作品）
+      <select name="bracket">
+        <option value="auto">自動</option>
+        <option value="《">《》</option>
+        <option value="｛">｛｝</option>
+        <option value="none">ルビとして扱わない</option>
+      </select>
+    </label>
+    <p id="version"></p>
+  </form>
+</dialog>
+
+<div id="toast" role="status" hidden></div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

@@ -5,7 +5,8 @@ export const BRACKETS = { '《': '》', '｛': '｝' };
 const BARS = new Set(['｜', '|']);
 const KANJI = /[㐀-䶿一-鿿豈-﫿\u{20000}-\u{3FFFF}々〆〇ヶ]/u;
 const LATIN = /[A-Za-zＡ-Ｚａ-ｚ]/;
-const BOTEN = /^[、・﹅]+$/;
+// 中黒（・）だけのルビは傍点にしない。英字の名前の空白に、カタカナ表記の中黒を振る書き方があるため（D-24）
+const BOTEN = /^[、﹅]+$/;
 
 // bracket はルビの開き括弧（《 か ｛）。null ならルビとして解釈しない
 export function parseLine(line, bracket = '《') {
